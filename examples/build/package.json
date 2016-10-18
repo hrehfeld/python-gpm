@@ -1,0 +1,18 @@
+{
+	"type": "model/x-quake-bsp",
+	"name": "5rivers",
+	"date": "2007-07-30",
+	"version": "1.0.0",
+	"description": "Mini campaign in DOOM 3 hell-style with three small to medium sized, dark and scrary maps, D3 textures (needless to say) and some ambient sounds.",
+	"keywords": [
+		"doom", "hell", "quoth", "doom3", "dark", "scary", "unique"
+	],
+	"author": "JPL",
+	"bugs": {
+		"url": "https://www.quaddicted.com/reviews/5rivers.html"
+	},
+	"homepage": "https://www.quaddicted.com/reviews/5rivers.html",
+	"dependencies": {
+		"quoth": "^2.2.0"
+	}
+}
