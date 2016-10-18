@@ -41,10 +41,10 @@ class QuakeBsp(DefaultHandler):
             with qdatap.open('r') as f:
                 qdata = json.load(f)
             r = odict()
+            r['name'] = d['name']
             for k in quake_bsp_keys:
                 if k in qdata:
                     r[k] = qdata[k]
-            r['name'] = d['name']
             rs.append(r)
         return rs
                     
@@ -121,18 +121,17 @@ def add(args, package_data, repos):
         repo_data[name] = p
 
         
-    def write_repo(repo_path, repo_data):
-        repo_path.parent.mkdir(parents=True, exist_ok=True)
-        with repo_path.open('w') as f:
-            json.dump(list(repo_data), f)
-
     for mimet, data in handler_data.items():
         handler = handlers[mimet]()
         subrepo_path = (repo_path.parent / (repo + '-' + handler.name)).with_suffix(repo_ext)
-        subrepo_data = handler(subrepo_path, repo_data, *zip(*data))
+        packages = handler(subrepo_path, repo_data, *zip(*data))
 
+        subrepo_data = repo_format(load_repo(subrepo_path))
+
+        for d in packages:
+            subrepo_data[d['name']] = d
         log('Writing ' + str(subrepo_path))
-        write_repo(subrepo_path, subrepo_data)
+        write_repo(subrepo_path, subrepo_data.values())
 
     log('Writing ' + str(repo_path))
     write_repo(repo_path, repo_data.values())
@@ -165,13 +164,21 @@ def load_repo(repo_path):
             data = json.load(f, object_pairs_hook=odict)
     return data
     
+def write_repo(repo_path, repo_data):
+    repo_path.parent.mkdir(parents=True, exist_ok=True)
+    with repo_path.open('w') as f:
+        json.dump(list(repo_data), f)
+
+
+def repo_format(data):
+    return odict([(d['name'], d) for d in data])
 
 def handle_repos(repositories, handle):
     repo_data = {}
     for repo, urls in repositories.items():
         repopath = repo_filepath(repo)
         data = handle(repopath, urls)
-        repo_data[repo] = odict([(d['name'], d) for d in data])
+        repo_data[repo] = repo_format(data)
     return repo_data
 
 def update_repos(repos):
