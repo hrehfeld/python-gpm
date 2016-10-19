@@ -1,6 +1,15 @@
 {
-	"type": "model/x-quake-bsp",
-	"name": "5rivers",
+	"type": {
+		"quake-bsp": {
+			"type": "1",
+			"rating": "5",
+			"title": "The Five Rivers Land",
+			"zipbasedir": "quoth",
+			"commandline": ["-hipnotic", "-game", "quoth"],
+			"startmap": "5rivers_e1"
+		}
+	}
+	, "name": "5rivers",
 	"date": "2007-07-30",
 	"version": "1.0.0",
 	"description": "Mini campaign in DOOM 3 hell-style with three small to medium sized, dark and scrary maps, D3 textures (needless to say) and some ambient sounds.",

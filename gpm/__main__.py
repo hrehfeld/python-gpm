@@ -10,6 +10,8 @@ from collections import OrderedDict as odict
 from zipfile import ZipFile
 import shutil
 
+default_type_data = {'quake-bsp': {}}
+
 repo_ext = '.json'
 
 
@@ -81,37 +83,25 @@ def container_fileinfos(path):
 class DefaultHandler:
     ext = 'zip'
 
+    def default_files(self, name):
+        return [Path(name).with_suffix('.' + self.ext)]
+        
+
 class QuakeBsp(DefaultHandler):
     name = 'quake-bsp'
 
     quake_path = Path('/home/hrehfeld/projects/quake/')
     package_keys = ['title', 'zipbasedir', 'commandline', 'startmap']
     
-    def repo_filepath(self, repo_path):
-        return 
-    
-    def __call__(self, repo_path, repo, data_paths, data):
-        #	"type": "1",
-        #	"rating": "5",
-        #	"title": "The Five Rivers Land",
-        #	"zipbasedir": "quoth",
-        #	"commandline": "-hipnotic -game quoth",
-        #	"startmap": "5rivers_e1"
-
+    def add(self, repo_data, datas):
         rs = []
-        for p, d in zip(data_paths, data):
-            qdatap = (p / self.name).with_suffix('.json')
-            if not qdatap.exists():
-                raise FileNotFoundError(str(qdatap))
-            with qdatap.open('r') as f:
-                qdata = json.load(f)
-            r = odict()
-            r['name'] = d['name']
-            for k in self.package_keys:
-                if k in qdata:
-                    r[k] = qdata[k]
-            rs.append(r)
-        return rs
+        for data in datas:
+            qdata = data['type'][self.name]
+            
+            for k in list(qdata.keys()):
+                if k not in self.package_keys:
+                    del (qdata[k])
+                    #raise Exception('Illegal key: %s' % k)
                     
 
     def install(self, p, subp, cachep, force_write):
@@ -234,17 +224,19 @@ def add(args, package_data, repos):
                 raise Exception('Package exists and version is not higher than existing package')
             log('updating package ' + name)
 
-        mimet = data.get('type', 'model/x-quake-bsp')
-
-        assert(mimet in handlers)
-        handler = handlers[mimet]()
+        type_data = data.get('type', default_type_data)
+        types = type_data.keys()
+        for t in types:
+            assert(t in handlers)
+        _handlers = [handlers[t]() for t in types]
 
         files = data.get('files', [])
         if files:
             files = [Path(f) for f in files]
         if not files:
-            f = Path(name).with_suffix('.' + handler.ext)
-            files = [f]
+            for handler in _handlers:
+                f = handler.default_files(name)
+                files += f
         real_files = [path / f for f in files]
         for f in real_files:
             if not f.exists():
@@ -252,18 +244,17 @@ def add(args, package_data, repos):
         file_infos = odict()
         for f, real_f in zip(files, real_files):
             r = odict()
-            r[hash_key] = get_hash(real_f)
+            r[hash_key] = hash_path(real_f)
             r['size'] = real_f.stat().st_size
             if is_container(real_f):
                 r['subfiles'] = container_fileinfos(real_f)
             file_infos[str(f)] = r
             
-
-
         data['files'] = file_infos
 
-        handler_data.setdefault(mimet, [])
-        handler_data[mimet].append((path, data))
+        for t in types:
+            handler_data.setdefault(t, [])
+            handler_data[t].append(data)
 
         p = odict()
         for k in package_keys:
@@ -272,17 +263,9 @@ def add(args, package_data, repos):
         repo_data[name] = p
 
         
-    for mimet, data in handler_data.items():
-        handler = handlers[mimet]()
-        subrepop = subrepo_path(repo, handler)
-        packages = handler(subrepop, repo_data, *zip(*data))
-
-        subrepo_data = repo_format(load_repo(subrepop))
-
-        for d in packages:
-            subrepo_data[d['name']] = d
-        log('Writing ' + str(subrepop))
-        write_repo(subrepop, subrepo_data.values())
+    for t, data in handler_data.items():
+        handler = handlers[t]()
+        handler.add(repo_data, data)
 
     log('Writing ' + str(repo_path))
     write_repo(repo_path, repo_data.values())
