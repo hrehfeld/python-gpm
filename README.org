@@ -3,5 +3,7 @@
 =gpm= will install different types of packages. Each Package defines its ~type~, plugin based /handlers/ install packages of different types.
 
 Packages can easily be defined with a [[https://docs.npmjs.com/files/package.json][npm package.json]]-like ~package.json~ file, and--if necessary--an accompanying ~<type>.json~ file with extra information for the handler.
+
+If ~package.json~ does not have a ~files~ section, a file of ~<packagename>.zip~ is assumed by most handlers.
 * Status
 very early.
