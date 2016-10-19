@@ -198,31 +198,19 @@ def subrepo_path(repo, handler):
 def log(msg):
     print(msg)
 
-def add(args, package_data, repos):
-    repo = args.repo
-    repo_path = repo_filepath(repo)
-    repo_data = odict()
-    if repo in repos:
-        repo_data = repos[repo]
-
-    paths = args.paths
-
+def add_s(args, paths, packages, package_data, repo_data):
     handler_data = odict()
-    for path in paths:
-        pjson = path / 'package.json'
-
-        with pjson.open('r') as f:
-            data = json.load(f)
+    for path, data in zip(paths, packages):
         name = data['name']
 
         version = data['version']
 
-        if name in package_data:
-            raise Exception('Package exists in other repo')
         if name in repo_data:
             if not args.force and not semver.compare(version, repo_data[name]['version']):
                 raise Exception('Package exists and version is not higher than existing package')
             log('updating package ' + name)
+        elif name in package_data:
+            raise Exception('Package exists in other repo')
 
         type_data = data.get('type', default_type_data)
         types = type_data.keys()
@@ -266,7 +254,25 @@ def add(args, package_data, repos):
     for t, data in handler_data.items():
         handler = handlers[t]()
         handler.add(repo_data, data)
+    
 
+def add(args, package_data, repos):
+    repo = args.repo
+    repo_data = odict()
+    if repo in repos:
+        repo_data = repos[repo]
+
+    paths = args.paths
+
+    for path in paths:
+        pjson = path / 'package.json'
+
+        with pjson.open('r') as f:
+            data = json.load(f)
+
+            add_s(args, [path], [data], package_data, repo_data)
+
+    repo_path = repo_filepath(repo)
     log('Writing ' + str(repo_path))
     write_repo(repo_path, repo_data.values())
     
