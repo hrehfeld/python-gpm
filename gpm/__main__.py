@@ -186,7 +186,7 @@ class QuakeBsp(DefaultHandler):
         print('wrote: %s' % written_files)
         print('errots: %s' % errors)
 
-handlers = { 'model/x-quake-bsp': QuakeBsp }
+handlers = { QuakeBsp.name: QuakeBsp }
 
 def repo_filepath(repo):
     return (repos_filepath / repo).with_suffix(repo_ext)
