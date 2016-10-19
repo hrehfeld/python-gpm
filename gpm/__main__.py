@@ -15,7 +15,7 @@ default_type_data = {'quake-bsp': {}}
 repo_ext = '.json'
 
 
-repositories = {'packages': []}
+repositories = {'quaddicted': []}
 
 repos_filepath = Path('repos')
 
