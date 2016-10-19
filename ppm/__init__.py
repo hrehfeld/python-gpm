@@ -7,20 +7,85 @@ import semver
 import hashlib
 from collections import OrderedDict as odict
 
+from zipfile import ZipFile
+import shutil
+
 repo_ext = '.json'
+
 
 repositories = {'packages': []}
 
 repos_filepath = Path('repos')
 
+repo_dl_dir = "https://www.quaddicted.com/filebase/"
+
+def repo_download_url(package, path):
+    return repo_dl_dir + path
+
+cache_dir = Path('/tmp/ppm/')
+backup_dir = cache_dir / '.backup'
+
+def cache_path(package, path=None):
+    r = cache_dir / (package['name'] + '-' + package['version'])
+    if not path:
+        return r
+    return r / path
+
+def cache_current(package, path):
+    return cache_path(package, path).exists()
+
+package_keys = ['type', 'name', 'version', 'description', 'keywords', 'author', 'contributors', 'bugs', 'homepage', 'dependencies', 'files']
+
+hash_key = 'sha1'
+
+
+
+
+def hash_path(path):
+    with path.open('rb') as f:
+        return hash_file(f)
+
+def hash_file(f):
+    hash = hashlib.sha1()
+    #todo read chunks
+    hash.update(f.read())
+    return hash.hexdigest()
+
+
+
+def is_container(f):
+    #todo support more
+    return f.suffix == '.zip'
+
+def container_fileinfos(path):
+    files = odict()
+    with ZipFile(str(path), 'r') as zf:
+        l = zf.filelist
+        for subpath in l:
+            r = odict()
+            r['size'] = subpath.file_size
+            #directories excluded
+            if subpath.file_size > 0:
+                with zf.open(subpath.filename, 'r') as f:
+                    hash = hash_file(f);
+                r[hash_key] = hash
+
+
+            files[subpath.filename] = r
+#    print(files)
+    return files
+            
+                
+    
+
 class DefaultHandler:
     ext = 'zip'
-
-quake_bsp_keys = ['title', 'zipbasedir', 'commandline', 'startmap']
 
 class QuakeBsp(DefaultHandler):
     name = 'quake-bsp'
 
+    quake_path = Path('/home/hrehfeld/projects/quake/')
+    package_keys = ['title', 'zipbasedir', 'commandline', 'startmap']
     
     def repo_filepath(self, repo_path):
         return 
@@ -42,21 +107,103 @@ class QuakeBsp(DefaultHandler):
                 qdata = json.load(f)
             r = odict()
             r['name'] = d['name']
-            for k in quake_bsp_keys:
+            for k in self.package_keys:
                 if k in qdata:
                     r[k] = qdata[k]
             rs.append(r)
         return rs
                     
-        
+
+    def install(self, p, subp, cachep, force_write):
+        name = p['name']
+
+        basedir = subp.get('zipbasedir', 'id1')
+
+        print(basedir)
+
+        qpath = self.quake_path
+        #todo handle
+        assert(qpath.exists())
+
+        def copy(force_write, dryrun, dlfd, path, f):
+            installp = qpath / basedir / path
+            relp = PurePath(basedir) / path
+            def write():
+                if not dry_run:
+                    installp.parent.mkdir(parents=True, exist_ok=True)
+                    if isdir:
+                        #create dirs as well
+                        print('creating dir %s' % installp)
+                        installp.mkdir()
+                    else:
+                        #write file
+                        with installp.open('wb') as fd:
+                            print('writing %s' % installp)
+                            shutil.copyfileobj(dlfd, fd)
+                return relp
+            
+            def backup():
+                bp = backup_dir / relp
+                bp.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(installp), str(bp))
+                
+            isdir = hash_key not in f
+            exists = installp.exists()
+            #check if f exists
+            if exists:
+                if isdir:
+                    if installp.is_dir():
+                        return None
+                    else:
+                        if force_write:
+                            backup()
+                        else:
+                            return 'directory %s exists' % installp
+                else:
+                    if installp.is_dir():
+                        backup()
+                    else:
+                        # and compare hash
+                        ha = hash_path(installp)
+                        if ha == f[hash_key]:
+                            return None
+                        else:
+                            if force_write:
+                                backup()
+                            else:
+                                return 'file %s exists with different hash' % installp
+            return write()
+        written_files = []
+        errors = []
+        dry_run = False
+        def add(r):
+            if isinstance(r, str):
+                errors.append(r)
+                dry_run = True
+            elif r is None:
+                pass
+            else:
+                written_files.append(r)
+        for path, f in p['files'].items():
+            if f['subfiles']:
+                cpath = (cachep / path)
+                #print('opening %s' % cpath)
+                with ZipFile(str(cpath), 'r') as zf:
+                    for subpath, subf in f['subfiles'].items():
+                        add(copy(force_write, dry_run, zf.open(subpath, 'r'), subpath, subf))
+            else:
+                add(copy(force_write, dry_run, path, f))
+        print('wrote: %s' % written_files)
+        print('errots: %s' % errors)
 
 handlers = { 'model/x-quake-bsp': QuakeBsp }
 
 def repo_filepath(repo):
     return (repos_filepath / repo).with_suffix(repo_ext)
 
+def subrepo_path(repo, handler):
+    return (repos_filepath / (repo + '-' + handler.name)).with_suffix(repo_ext)
 
-package_keys = ['type', 'name', 'version', 'description', 'keywords', 'author', 'contributors', 'bugs', 'homepage', 'dependencies', 'files']
 
 def log(msg):
     print(msg)
@@ -80,6 +227,8 @@ def add(args, package_data, repos):
 
         version = data['version']
 
+        if name in package_data:
+            raise Exception('Package exists in other repo')
         if name in repo_data:
             if not args.force and not semver.compare(version, repo_data[name]['version']):
                 raise Exception('Package exists and version is not higher than existing package')
@@ -100,16 +249,18 @@ def add(args, package_data, repos):
         for f in real_files:
             if not f.exists():
                 raise FileNotFoundError(str(f))
-        def hash(path):
-            hash = hashlib.sha1()
-            with path.open('rb') as f:
-                #todo read chunks
-                hash.update(f.read())
-            return hash.hexdigest()
-        hashes = [hash(f) for f in real_files]
-        filesizes = [f.stat().st_size for f in real_files]
-        data['files'] = [odict([('path', str(f)), ('sha1', hash), ('size', size)])
-                         for f, hash, size in zip(files, hashes, filesizes)]
+        file_infos = odict()
+        for f, real_f in zip(files, real_files):
+            r = odict()
+            r[hash_key] = get_hash(real_f)
+            r['size'] = real_f.stat().st_size
+            if is_container(real_f):
+                r['subfiles'] = container_fileinfos(real_f)
+            file_infos[str(f)] = r
+            
+
+
+        data['files'] = file_infos
 
         handler_data.setdefault(mimet, [])
         handler_data[mimet].append((path, data))
@@ -123,25 +274,57 @@ def add(args, package_data, repos):
         
     for mimet, data in handler_data.items():
         handler = handlers[mimet]()
-        subrepo_path = (repo_path.parent / (repo + '-' + handler.name)).with_suffix(repo_ext)
-        packages = handler(subrepo_path, repo_data, *zip(*data))
+        subrepop = subrepo_path(repo, handler)
+        packages = handler(subrepop, repo_data, *zip(*data))
 
-        subrepo_data = repo_format(load_repo(subrepo_path))
+        subrepo_data = repo_format(load_repo(subrepop))
 
         for d in packages:
             subrepo_data[d['name']] = d
-        log('Writing ' + str(subrepo_path))
-        write_repo(subrepo_path, subrepo_data.values())
+        log('Writing ' + str(subrepop))
+        write_repo(subrepop, subrepo_data.values())
 
     log('Writing ' + str(repo_path))
     write_repo(repo_path, repo_data.values())
     
         
         
-def install(args, package_data, repos):
+def install(args, package_data, repo_data):
     packages = args.packages
-    for p in packages:
-        pass
+    for name in packages:
+        if name not in package_data:
+            raise Exception('No such package: ' + name)
+        p = package_data[name]
+        print(p)
+
+        cachedirp = cache_path(p)
+        files = p['files']
+        for path, f in files.items():
+            cachep = cache_path(p, path)
+            if cache_current(p, path):
+                continue
+            url = repo_download_url(p, path)
+            print('Downloading %s...' % url)
+            r = requests.get(url)
+            if r.status_code != 200:
+                raise Exception('Could not download file: %i (%s)' % (r.status_code, url))
+
+            hash = hashlib.sha1()
+            hash.update(r.content)
+            ha = hash.hexdigest()
+            if ha != f[hash_key]:
+                raise Exception('Download for %s was broken (failed hash).' % url)
+
+            cachep.parent.mkdir(parents=True, exist_ok=True)
+            with cachep.open('wb') as f:
+                f.write(r.content)
+
+
+        mimetype = p['type']
+        handler = handlers[mimetype]()
+        subrepop = subrepo_path(repo, handler)
+        subrepo_data = repo_format(load_repo(subrepop))
+        handler.install(p, subrepo_data[p['name']], cachedirp, args.force)
 
 
 def update_repo(repo_path, urls):
@@ -153,12 +336,12 @@ def update_repo(repo_path, urls):
         with repopath.open('w') as f:
             f.write(r.text)
         return r.json
-    raise Exception('No response from any remote')
+    raise Exception('No response from any remote. Tried: ' + ', '.join(urls) + '.')
     
 def load_repo(repo_path):
     data = []
     if not repo_path.exists():
-        log('Skipping repo ' + repo + ', because file doesn\'t exist.')
+        log('Skipping repo ' + str(repo_path) + ', because file doesn\'t exist.')
     else:
         with repo_path.open('r') as f:
             data = json.load(f, object_pairs_hook=odict)
@@ -173,22 +356,24 @@ def write_repo(repo_path, repo_data):
 def repo_format(data):
     return odict([(d['name'], d) for d in data])
 
-def handle_repos(repositories, handle):
+def update_repos(repositories):
     repo_data = {}
     for repo, urls in repositories.items():
         repopath = repo_filepath(repo)
-        data = handle(repopath, urls)
+        data = update_repo(repopath, urls)
         repo_data[repo] = repo_format(data)
     return repo_data
 
-def update_repos(repos):
-    return handle_repos(repos, lambda p, urls: update_repo(p, urls))
-
 def load_repos(repos):
-    return handle_repos(repos, lambda p, urls: load_repo(p))
+    repo_data = {}
+    for repo in repositories:
+        repopath = repo_filepath(repo)
+        data = load_repo(repopath)
+        repo_data[repo] = repo_format(data)
+    return repo_data
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Build the website's HTML from content/ and templates/, writing to output/.")
+    parser = argparse.ArgumentParser(description="A plugin/handler based package manager")
     parser.add_argument('--update', '-y', action='store_true', help="Update package lists.")
 
     subparsers = parser.add_subparsers(help='sub-command help')
@@ -199,6 +384,7 @@ if __name__ == '__main__':
     add_p.set_defaults(func=add)
     install_p = subparsers.add_parser('install', help='install a package')
     install_p.add_argument('packages', nargs='+', help="Packages to work on.")
+    install_p.add_argument('--force', '-f', action='store_true', help="Force overwriting of existing files")
     install_p.set_defaults(func=install)
     
     args = parser.parse_args()
