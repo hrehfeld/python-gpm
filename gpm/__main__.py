@@ -1,3 +1,4 @@
+import os
 import requests
 import argparse
 from pathlib import PurePath, Path
@@ -10,9 +11,34 @@ from collections import OrderedDict as odict
 from zipfile import ZipFile
 import shutil
 
+import datetime
+
+date_format = '%Y-%m-%d %H:%M:%S %z'
+
 default_type_data = {'quake-bsp': {}}
 
 repo_ext = '.json'
+state_ext = '.json'
+
+config_dir = Path(os.path.expanduser('~')) / Path('.python-gpm')
+state_dir = config_dir / 'state'
+installed_state_dir = state_dir / 'installed'
+installed_state_file = (state_dir / 'installed').with_suffix(state_ext)
+
+def write_installed_state(state):
+    with installed_state_file.open('w') as f:
+        json.dump(state, f)
+
+def load_installed_state():
+    if installed_state_file.exists():
+        return load_json(installed_state_file)
+    return odict()
+
+def package_state_path(name):
+    return (installed_state_dir / name).with_suffix(state_ext)
+
+def package_backup_file(name):
+    return (installed_state_dir / name).with_suffix('.package')
 
 
 repositories = {'quaddicted': []}
@@ -129,7 +155,7 @@ class QuakeBsp(DefaultHandler):
                         with installp.open('wb') as fd:
                             print('writing %s' % installp)
                             shutil.copyfileobj(dlfd, fd)
-                return relp
+                return path
             
             def backup():
                 bp = backup_dir / relp
@@ -175,18 +201,20 @@ class QuakeBsp(DefaultHandler):
             elif r is None:
                 pass
             else:
-                written_files.append(r)
+                written_files.append(str(r) )
         for path, f in p['files'].items():
             if f['subfiles']:
                 cpath = (cachep / path)
                 #print('opening %s' % cpath)
                 with ZipFile(str(cpath), 'r') as zf:
                     for subpath, subf in f['subfiles'].items():
-                        add(copy(force_write, dry_run, zf.open(subpath, 'r'), subpath, subf))
+                        add(copy(force_write, dry_run, zf.open(subpath, 'r'), Path(subpath), subf))
             else:
-                add(copy(force_write, dry_run, path, f))
+                add(copy(force_write, dry_run, Path(path), f))
+        
         print('wrote: %s' % written_files)
         print('errots: %s' % errors)
+        return {'written': written_files}
 
 handlers = { QuakeBsp.name: QuakeBsp }
 
@@ -278,15 +306,27 @@ def add(args, package_data, repos):
     log('Writing ' + str(repo_path))
     write_repo(repo_path, repo_data.values())
     
-        
+def make_dirs(p):
+    p.mkdir(parents=True, exist_ok=True)
+    
         
 def install(args, package_data, repo_data):
+    make_dirs(installed_state_dir)
+
+    installed_packages = load_installed_state()
     packages = args.packages
     for name in packages:
         if name not in package_data:
             raise Exception('No such package: ' + name)
         p = package_data[name]
-        print(p)
+        if name in installed_packages:
+            oldp = load_json(package_backup_file(name))
+            print(p, oldp)
+            if semver.compare(p['version'], oldp['version']) != 1:
+                raise Exception('Package %s already installed at version %s (trying: %s)' %  (name, oldp['version'], p['version']))
+        as_dependency = False
+        with package_backup_file(name).open('w') as f:
+            json.dump(p, f)
 
         cachedirp = cache_path(p)
         files = p['files']
@@ -312,13 +352,24 @@ def install(args, package_data, repo_data):
 
 
         types = p['type']
+        state = odict()
         for t in types:
             handler = handlers[t]()
-            handler.install(p, cachedirp, args.force)
+            state[t] = handler.install(p, cachedirp, args.force)
+
+        with package_state_path(name).open('w') as f:
+            json.dump(state, f)
+        installed_packages[name] = odict([('date', datetime.datetime.now(datetime.timezone.utc).strftime(date_format))
+                                          , ('as_dependency', as_dependency )])
+    write_installed_state(installed_packages)
 
 def list_packages(args, package_data, repo_data):
+    installed_packages = load_installed_state()
     for p in package_data:
-        print(p)
+        s = [p]
+        if p in installed_packages:
+            s.append('[installed]')
+        print(*s)
 
 def update_repo(repo_path, urls):
     for url in urls:
@@ -330,14 +381,17 @@ def update_repo(repo_path, urls):
             f.write(r.text)
         return r.json
     raise Exception('No response from any remote. Tried: ' + ', '.join(urls) + '.')
-    
+
+def load_json(path):
+    with path.open('r') as f:
+        return json.load(f, object_pairs_hook=odict)
+
 def load_repo(repo_path):
     data = []
     if not repo_path.exists():
         log('Skipping repo ' + str(repo_path) + ', because file doesn\'t exist.')
     else:
-        with repo_path.open('r') as f:
-            data = json.load(f, object_pairs_hook=odict)
+        data = load_json(repo_path)
     return data
     
 def write_repo(repo_path, repo_data):
@@ -391,7 +445,7 @@ if __name__ == '__main__':
     else:
         repo_data = load_repos(repositories)
 
-    package_data = {}
+    package_data = odict()
     for repo, data in repo_data.items():
         for values in data.values():
             name = values['name']
