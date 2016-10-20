@@ -35,10 +35,11 @@ def load_installed_state():
     return odict()
 
 def package_state_path(name):
-    return (installed_state_dir / name).with_suffix(state_ext)
+    p = (installed_state_dir / name)
+    return p.with_suffix(p.suffix + state_ext)
 
 def package_backup_file(name):
-    return (installed_state_dir / name).with_suffix('.package')
+    return package_state_path(name).with_suffix('.package')
 
 
 repositories = {'quaddicted': []}
@@ -110,7 +111,8 @@ class DefaultHandler:
     ext = 'zip'
 
     def default_files(self, name):
-        return [Path(name).with_suffix('.' + self.ext)]
+        p = Path(name)
+        return [p.with_suffix(p.suffix + '.' + self.ext)]
         
 
 class QuakeBsp(DefaultHandler):
@@ -222,7 +224,8 @@ def repo_filepath(repo):
     return (repos_filepath / repo).with_suffix(repo_ext)
 
 def subrepo_path(repo, handler):
-    return (repos_filepath / (repo + '-' + handler.name)).with_suffix(repo_ext)
+    p = (repos_filepath / (repo + '-' + handler.name))
+    return p.with_suffix(p.suffix + repo_ext)
 
 
 def log(msg):
@@ -232,6 +235,7 @@ def add_s(force, paths, packages, package_data, repo_data):
     handler_data = odict()
     for path, data in zip(paths, packages):
         name = data['name']
+        log('adding %s...' % name)
 
         version = data['version']
 
@@ -309,22 +313,85 @@ def add(args, package_data, repos):
 def make_dirs(p):
     p.mkdir(parents=True, exist_ok=True)
     
-        
+def compare_installed_version(name, cmpversion):
+    p = load_json(package_backup_file(name))
+    version = p['version']
+    return version, semver.compare(cmpversion, version)
+
+def installed_version(name):
+    p = load_json(package_backup_file(name))
+    version = p['version']
+    return version
+
 def install(args, package_data, repo_data):
     make_dirs(installed_state_dir)
 
     installed_packages = load_installed_state()
     packages = args.packages
+    to_install = []
     for name in packages:
         if name not in package_data:
             raise Exception('No such package: ' + name)
         p = package_data[name]
         if name in installed_packages:
-            oldp = load_json(package_backup_file(name))
-            print(p, oldp)
-            if semver.compare(p['version'], oldp['version']) != 1:
-                raise Exception('Package %s already installed at version %s (trying: %s)' %  (name, oldp['version'], p['version']))
-        as_dependency = False
+            instversion = installed_version(name)
+            if semver.compare(instversion, p['version']) != -1:
+                raise Exception('Package %s already installed at version %s (trying: %s)' %  (name, instversion, p['version']))
+        def match_version(v, matchv):
+            # version Must match version exactly
+            # >version Must be greater than version
+            # >=version etc
+            # <version
+            # <=version
+            # ~version "Approximately equivalent to version" See semver
+            # ^version "Compatible with version" See semver
+            # 1.2.x 1.2.0, 1.2.1, etc., but not 1.3.0
+            # http://... See 'URLs as Dependencies' below
+            # * Matches any version
+            # "" (just an empty string) Same as *
+            # version1 - version2 Same as >=version1 <=version2.
+            # range1 || range2 Passes if either range1 or range2 are satisfied.
+            # git... See 'Git URLs as Dependencies' below
+            # user/repo See 'GitHub URLs' below
+            # tag A specific version tagged and published as tag See npm-tag
+            # path/path/path See Local Paths below
+            m = matchv.strip()
+#            mvs = m.split()
+#            if len(vs) > 1:
+#                return all([match_version(v, mv) for mv in mvs])
+            # * Matches any version
+            # "" (just an empty string) Same as *
+            if m == '*' or m == '': return True
+            c = semver.match
+            # >version Must be greater than version
+            # >=version etc
+            # <version
+            # <=version
+            if m[:2] in ['>=', '<='] or m[0] in '><':
+                return c(v, m)
+            # parts = m.split('.')
+            # for i, p in enumerate(parts):
+            #     if p == 'x':
+            # version Must match version exactly
+            return c(v, '==' + m)
+                    
+            
+        for dep, version in p['dependencies'].items():
+            install = True
+            if dep not in package_data:
+                raise Exception('No such package: %s (as dependency of %s)' % (dep, name) )
+            if dep in installed_packages:
+                inst = installed_version(dep)
+                if match_version(instv, version):
+                    install = False
+            if install:
+                p = package_data[dep]
+                if not match_version(p['version'], version):
+                    raise Exception('Package %s required at version %s (trying: %s)' %  (name, version, p['version']))
+                to_install.append((dep, True))
+        to_install.append((name, False))
+    print(to_install)
+    for name, as_dependency in to_install:
         with package_backup_file(name).open('w') as f:
             json.dump(p, f)
 
@@ -350,7 +417,7 @@ def install(args, package_data, repo_data):
             with cachep.open('wb') as f:
                 f.write(r.content)
 
-
+        print('installing', name)
         types = p['type']
         state = odict()
         for t in types:
