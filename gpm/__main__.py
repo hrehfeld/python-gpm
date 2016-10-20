@@ -432,11 +432,23 @@ def install(args, package_data, repo_data):
 
 def list_packages(args, package_data, repo_data):
     installed_packages = load_installed_state()
+    preds = odict()
+    formats = []
+    if not args.all:
+        preds['installed'] = lambda p: p in installed_packages
+    else:
+        formats.append(lambda p: p + ['[installed]'] if p[0] in installed_packages else p)
+    if args.deps:
+        preds['deps'] = lambda p: p in installed_packages and installed_packages[p]['as_dependency']
+    if args.explicit:
+        preds['explicit'] = lambda p: p in installed_packages and not installed_packages[p]['as_dependency']
+
     for p in package_data:
-        s = [p]
-        if p in installed_packages:
-            s.append('[installed]')
-        print(*s)
+        if all([pr(p) for pr in preds.values()]):
+            s = [p]
+            for f in formats:
+                s = f(s)
+            print(*s)
 
 def update_repo(repo_path, urls):
     for url in urls:
@@ -501,6 +513,24 @@ if __name__ == '__main__':
     install_p.add_argument('--force', '-f', action='store_true', help="Force overwriting of existing files")
     install_p.set_defaults(func=install)
     list_p = subparsers.add_parser('list', help='List packages in the index')
+
+    list_p.add_argument('--all', '-a', action='store_true', help="List all packages instead of only installed")
+    list_p.add_argument('-d', '--deps', help='list packages installed as dependencies [filter]', action='store_true')
+    list_p.add_argument('-e', '--explicit', help='list packages explicitly installed [filter]', action='store_true')
+#    list_p.add_argument('-g', '--groups', help='view all members of a package group', action='store_true')
+#    list_p.add_argument('-i', '--info', help='view package information (-ii for backup files)', action='store_true')
+#    list_p.add_argument('-k', '--check', help='check that package files exist (-kk for file properties)', action='store_true')
+#    list_p.add_argument('-l', '--list', help='list the files owned by the queried package', action='store_true')
+#    list_p.add_argument('-m', '--foreign', help='list installed packages not found in sync db(s) [filter]', action='store_true')
+#    list_p.add_argument('-n', '--native', help='list installed packages only found in sync db(s) [filter]', action='store_true')
+#    list_p.add_argument('-o', '--owns', help='query the package that owns <file>', action='store_true')
+#    list_p.add_argument('-p', '--file', help='query a package file instead of the database')
+#    list_p.add_argument('-q', '--quiet', help='show less information for query and search')
+#    list_p.add_argument('-r', '--root', help='set an alternate installation root')
+#    list_p.add_argument('-s', '--search', help='search locally-installed packages for matching strings')
+#    list_p.add_argument('-t', '--unrequired', help='list packages not (optionally) required by any package (-tt to ignore optdepends) [filter]')
+#    list_p.add_argument('-u', '--upgrades', help='list outdated packages [filter]')
+  
     list_p.set_defaults(func=list_packages)
     
     args = parser.parse_args()
