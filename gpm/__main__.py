@@ -104,12 +104,11 @@ class QuakeBsp(DefaultHandler):
                     #raise Exception('Illegal key: %s' % k)
                     
 
-    def install(self, p, subp, cachep, force_write):
+    def install(self, p, cachep, force_write):
         name = p['name']
 
+        subp = p['type'][self.name]
         basedir = subp.get('zipbasedir', 'id1')
-
-        print(basedir)
 
         qpath = self.quake_path
         #todo handle
@@ -151,7 +150,10 @@ class QuakeBsp(DefaultHandler):
                             return 'directory %s exists' % installp
                 else:
                     if installp.is_dir():
-                        backup()
+                        if force_write:
+                            backup()
+                        else:
+                            return 'directory %s exists, expected file' % installp
                     else:
                         # and compare hash
                         ha = hash_path(installp)
@@ -198,7 +200,7 @@ def subrepo_path(repo, handler):
 def log(msg):
     print(msg)
 
-def add_s(args, paths, packages, package_data, repo_data):
+def add_s(force, paths, packages, package_data, repo_data):
     handler_data = odict()
     for path, data in zip(paths, packages):
         name = data['name']
@@ -206,7 +208,7 @@ def add_s(args, paths, packages, package_data, repo_data):
         version = data['version']
 
         if name in repo_data:
-            if not args.force and not semver.compare(version, repo_data[name]['version']):
+            if not force and not semver.compare(version, repo_data[name]['version']) > 0:
                 raise Exception('Package exists and version is not higher than existing package')
             log('updating package ' + name)
         elif name in package_data:
@@ -270,7 +272,7 @@ def add(args, package_data, repos):
         with pjson.open('r') as f:
             data = json.load(f)
 
-            add_s(args, [path], [data], package_data, repo_data)
+            add_s(args.force, [path], [data], package_data, repo_data)
 
     repo_path = repo_filepath(repo)
     log('Writing ' + str(repo_path))
@@ -309,12 +311,14 @@ def install(args, package_data, repo_data):
                 f.write(r.content)
 
 
-        mimetype = p['type']
-        handler = handlers[mimetype]()
-        subrepop = subrepo_path(repo, handler)
-        subrepo_data = repo_format(load_repo(subrepop))
-        handler.install(p, subrepo_data[p['name']], cachedirp, args.force)
+        types = p['type']
+        for t in types:
+            handler = handlers[t]()
+            handler.install(p, cachedirp, args.force)
 
+def list_packages(args, package_data, repo_data):
+    for p in package_data:
+        print(p)
 
 def update_repo(repo_path, urls):
     for url in urls:
@@ -375,6 +379,8 @@ if __name__ == '__main__':
     install_p.add_argument('packages', nargs='+', help="Packages to work on.")
     install_p.add_argument('--force', '-f', action='store_true', help="Force overwriting of existing files")
     install_p.set_defaults(func=install)
+    list_p = subparsers.add_parser('list', help='List packages in the index')
+    list_p.set_defaults(func=list_packages)
     
     args = parser.parse_args()
 
