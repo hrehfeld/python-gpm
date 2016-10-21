@@ -47,9 +47,25 @@ repositories = {'quaddicted': []}
 repos_filepath = Path('repos')
 
 repo_dl_dir = "https://www.quaddicted.com/filebase/"
+repo_dl_dir = "file:///home/hrehfeld/projects/quakeinjector/download/"
 
 def repo_download_url(package, path):
     return repo_dl_dir + path
+
+def get_uri(url):
+    #todo better support file://
+    prot = 'file://'
+    if not url.startswith(prot):
+        print('Downloading %s...' % url)
+        r = requests.get(url)
+        
+        if r.status_code != 200:
+            raise Exception('Could not download file: %i (%s)' % (r.status_code, url))
+        return r.content
+    else:
+        with Path(url[len(prot):]).open('rb') as fd:
+            return fd.read()
+                
 
 cache_dir = Path('/tmp/ppm/')
 backup_dir = cache_dir / '.backup'
@@ -80,7 +96,8 @@ def hash_file(f):
     hash.update(f.read())
     return hash.hexdigest()
 
-
+def is_dir(pinfo):
+    return pinfo['size'] == 0
 
 def is_container(f):
     #todo support more
@@ -121,6 +138,13 @@ class QuakeBsp(DefaultHandler):
     quake_path = Path('/home/hrehfeld/projects/quake/')
     package_keys = ['title', 'zipbasedir', 'commandline', 'startmap']
     
+
+    def basedir(self, subp):
+        return subp.get('zipbasedir', 'id1')
+
+    def get_install_path(self, basedir, path):
+        return self.quake_path / basedir / path
+    
     def add(self, repo_data, datas):
         rs = []
         for data in datas:
@@ -136,26 +160,26 @@ class QuakeBsp(DefaultHandler):
         name = p['name']
 
         subp = p['type'][self.name]
-        basedir = subp.get('zipbasedir', 'id1')
+        basedir = self.basedir(subp)
 
         qpath = self.quake_path
         #todo handle
         assert(qpath.exists())
 
         def copy(force_write, dryrun, dlfd, path, f):
-            installp = qpath / basedir / path
+            installp = self.get_install_path(basedir, path)
             relp = PurePath(basedir) / path
             def write():
                 if not dry_run:
                     installp.parent.mkdir(parents=True, exist_ok=True)
                     if isdir:
                         #create dirs as well
-                        print('creating dir %s' % installp)
+                        log('creating dir %s' % installp)
                         installp.mkdir()
                     else:
                         #write file
                         with installp.open('wb') as fd:
-                            print('writing %s' % installp)
+                            log('writing %s' % installp)
                             shutil.copyfileobj(dlfd, fd)
                 return path
             
@@ -164,7 +188,7 @@ class QuakeBsp(DefaultHandler):
                 bp.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(installp), str(bp))
                 
-            isdir = hash_key not in f
+            isdir = is_dir(f)
             exists = installp.exists()
             #check if f exists
             if exists:
@@ -214,9 +238,66 @@ class QuakeBsp(DefaultHandler):
             else:
                 add(copy(force_write, dry_run, Path(path), f))
         
-        print('wrote: %s' % written_files)
+        #todo handle errors
         print('errots: %s' % errors)
         return {'written': written_files}
+
+    def remove(self, pkg, state):
+        written_files = state['written']
+        files = pkg['files']
+
+        subpkg = pkg['type'][self.name]
+        basedir = self.basedir(subpkg)
+
+        to_remove = []
+        install_paths = [self.get_install_path(basedir, path) for path in written_files]
+
+        for path, install_path in zip(written_files, install_paths):
+            print(path)
+            if not install_path.exists():
+                raise Exception('%s was written, but does not exist anymore')
+            
+            pinfo = None
+            if path in files:
+                pinfo = files[path]
+            else:
+                #check container files
+                for fp, f in files.items():
+                    if 'subfiles' in f:
+                        sfiles = f['subfiles']
+                        #todo handle relative paths?
+                        if path in sfiles:
+                            pinfo = sfiles[path]
+                            break
+            if not pinfo:
+                raise Exception('%s was written, but was not found in pkg file for  %s' % (path, pkg['name']))
+            if is_dir(pinfo):
+                #for subf in install_path.iterdir():
+                #    if subf not in install_paths:
+                #        raise Exception('File %s in %s/ was not installed, cannot delete dir' % (subf, path))
+                if not len(installed_path.iterdir()):
+                    to_remove.append(install_path)
+            else:
+                stats = install_path.stat()
+                if pinfo['size'] != stats.st_size:
+                    raise Exception('%s was written, but was modified' % (path))
+                if pinfo[hash_key] != hash_path(install_path):
+                    raise Exception('%s was written, but was modified' % (path))
+                to_remove.append(install_path)
+        print(to_remove)
+
+        dirs = []
+        for path in to_remove :
+            if path.is_dir():
+                dirs.append(path)
+                continue
+            log('Removing %s' % path)
+            path.unlink()
+
+        for path in dirs:
+            log('Removing %s' % path)
+            path.rmdir()
+
 
 handlers = { QuakeBsp.name: QuakeBsp }
 
@@ -230,6 +311,9 @@ def subrepo_path(repo, handler):
 
 def log(msg):
     print(msg)
+
+def warn(msg):
+    print('WARNING:', msg)
 
 def add_s(force, paths, packages, package_data, repo_data):
     handler_data = odict()
@@ -310,8 +394,14 @@ def add(args, package_data, repos):
     log('Writing ' + str(repo_path))
     write_repo(repo_path, repo_data.values())
     
-def make_dirs(p):
-    p.mkdir(parents=True, exist_ok=True)
+def make_dirs(path):
+    created = []
+    for p in reversed([path] + list(path.parents)):
+        print(p)
+        if not p.exists():
+            p.mkdir()
+            created.append(p)
+    return created
     
 def compare_installed_version(name, cmpversion):
     p = load_json(package_backup_file(name))
@@ -377,23 +467,36 @@ def install(args, package_data, repo_data):
                     
             
         for dep, version in p['dependencies'].items():
-            install = True
             if dep not in package_data:
                 raise Exception('No such package: %s (as dependency of %s)' % (dep, name) )
+            req_by = odict()
             if dep in installed_packages:
-                inst = installed_version(dep)
-                if match_version(instv, version):
-                    install = False
+                dep_state = installed_packages[dep]
+                dep_version = dep_state['version']
+                req_by = dep_state['as_dependency']
+                if match_version(dep_version, version):
+                    req_by[name] = version
+                    continue
+            #need to update
+            dep_pkg = package_data[dep]
+            if not match_version(dep_pkg['version'], version):
+                raise Exception('Package %s required at version %s (trying: %s)' %  (name, version, dep_pkg['version']))
+
+            version_conflicts = []
+            for oname, oversion in req_by.items():
+                if not match_version(dep_pkg['version'], oversion):
+                    version_conflicts.append((oname, oversion))
+            if version_conflicts:
+                raise Exception('Version Conflict: %s (%s) required by %s at %s in conflict with %s'
+                                %  (dep, dep_version, name, version, ' and '.join(['%s at %s' % (n, v) for (n, v) in version_conflicts])))
+                        
             if install:
-                p = package_data[dep]
-                if not match_version(p['version'], version):
-                    raise Exception('Package %s required at version %s (trying: %s)' %  (name, version, p['version']))
-                to_install.append((dep, True))
-        to_install.append((name, False))
+                to_install.append((dep, [(name, version)]))
+        to_install.append((name, []))
     print(to_install)
     for name, as_dependency in to_install:
-        with package_backup_file(name).open('w') as f:
-            json.dump(p, f)
+        p = package_data[name]
+        write_json(p, package_backup_file(name))
 
         cachedirp = cache_path(p)
         files = p['files']
@@ -401,21 +504,17 @@ def install(args, package_data, repo_data):
             cachep = cache_path(p, path)
             if cache_current(p, path):
                 continue
-            url = repo_download_url(p, path)
-            print('Downloading %s...' % url)
-            r = requests.get(url)
-            if r.status_code != 200:
-                raise Exception('Could not download file: %i (%s)' % (r.status_code, url))
+            content = get_uri(repo_download_url(p, path))
 
             hash = hashlib.sha1()
-            hash.update(r.content)
+            hash.update(content)
             ha = hash.hexdigest()
             if ha != f[hash_key]:
                 raise Exception('Download for %s was broken (failed hash).' % url)
 
             cachep.parent.mkdir(parents=True, exist_ok=True)
             with cachep.open('wb') as f:
-                f.write(r.content)
+                f.write(content)
 
         print('installing', name)
         types = p['type']
@@ -424,10 +523,89 @@ def install(args, package_data, repo_data):
             handler = handlers[t]()
             state[t] = handler.install(p, cachedirp, args.force)
 
-        with package_state_path(name).open('w') as f:
-            json.dump(state, f)
-        installed_packages[name] = odict([('date', datetime.datetime.now(datetime.timezone.utc).strftime(date_format))
-                                          , ('as_dependency', as_dependency )])
+        write_json(state, package_state_path(name))
+
+        installed_packages[name] = odict([
+            ('date', datetime.datetime.now(datetime.timezone.utc).strftime(date_format))
+            , ('version', p['version'])
+            , ('as_dependency', odict(as_dependency))
+        ])
+    write_installed_state(installed_packages)
+
+
+
+def remove(args, package_data, repo_data):
+    make_dirs(installed_state_dir)
+
+    installed_packages = load_installed_state()
+    packages = args.packages
+
+    def is_required(*names):
+        req = [[] for n in names]
+        for o in installed_packages:
+            p = package_data[o]
+            #check if version in pkg list is still same
+            ostate = installed_packages[o]
+            if ostate['version'] != p['version']:
+                #if not load version from state
+                p = load_json(package_backup_file(o))
+
+            for i, n in enumerate(names):
+                if n in p['dependencies']:
+                    req[i].append(o)
+        return req
+
+    def check_remove(name, also_removed=[], error_on_required=True, ):
+        print(name)
+        if name not in installed_packages:
+            raise Exception('Package %s is not installed' % name)
+
+        req_by = installed_packages[name]['as_dependency']
+        req_by = [n for n in req_by.keys() if n not in also_removed]
+        if req_by:
+            if error_on_required:
+                raise Exception('Package %s is still required by %s' % (name, ', '.join(req_by)))
+            else:
+                log('%s still required by %s' %(name, req_by))
+                return []
+            
+        to_remove = [name]
+
+        pkg = load_json(package_backup_file(name))
+        deps = pkg['dependencies']
+        for dep in deps:
+            dep_req_by = installed_packages[dep]['as_dependency']
+            if args.unneeded:
+                #todo take care of circular references, esp if dep is req by other that is requiuired by another
+                to_remove += check_remove(dep, also_removed + [name], False)
+        return to_remove
+        
+                    
+    to_remove = []
+    for name in packages:
+        to_remove += check_remove(name, packages)
+    print(to_remove)
+    for name in to_remove:
+        inst = installed_packages[name]
+        
+        state = load_json(package_state_path(name))
+
+        pkg = package_data[name]
+        #check if version in pkg list is still same
+        if inst['version'] != pkg['version']:
+            #if not load pkg from disk
+            pkg = load_json(package_backup_file(name))
+
+        types = pkg['type']
+        for t in types:
+            handler = handlers[t]()
+            handler.remove(pkg, state[t])
+
+        
+
+        pkg_path = package_state_path(name)
+        pkg_path.unlink()
+        del installed_packages[name]
     write_installed_state(installed_packages)
 
 def list_packages(args, package_data, repo_data):
@@ -464,6 +642,12 @@ def update_repo(repo_path, urls):
 def load_json(path):
     with path.open('r') as f:
         return json.load(f, object_pairs_hook=odict)
+
+def write_json(data, path):
+    log('writing %s' % path)
+    with path.open('w') as f:
+        json.dump(data, f)
+    
 
 def load_repo(repo_path):
     data = []
@@ -512,6 +696,20 @@ if __name__ == '__main__':
     install_p.add_argument('packages', nargs='+', help="Packages to work on.")
     install_p.add_argument('--force', '-f', action='store_true', help="Force overwriting of existing files")
     install_p.set_defaults(func=install)
+
+    remove_p = subparsers.add_parser('remove', help='Remove a package')
+    remove_p.add_argument('packages', nargs='+', help="Packages to work on.")
+    remove_p.set_defaults(func=remove)
+    #  remove_p.add_argument('-b', '--dbpath', help='set an alternate database location', action='store_true')
+    #  remove_p.add_argument('-c', '--cascade', help='remove packages and all packages that depend on them', action='store_true')
+    #  remove_p.add_argument('-d', '--nodeps', help='skip dependency version checks (-dd to skip all checks)', action='store_true')
+    #  remove_p.add_argument('-n', '--nosave', help='remove configuration files', action='store_true')
+    #  remove_p.add_argument('-p', '--print', help='print the targets instead of performing the operation', action='store_true')
+    #  remove_p.add_argument('-r', '--root', help='set an alternate installation root', action='store_true')
+    #  remove_p.add_argument('-s', '--recursive', help='remove unnecessary dependencies', action='store_true')
+    #  remove_p.add_argument('-ss', '--recursive', help='also remove explicitly installed dependencies', action='store_true')
+    remove_p.add_argument('--unneeded', '-u', help='remove unneeded packages', action='store_true')
+    
     list_p = subparsers.add_parser('list', help='List packages in the index')
 
     list_p.add_argument('--all', '-a', action='store_true', help="List all packages instead of only installed")
