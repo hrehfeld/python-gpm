@@ -250,12 +250,12 @@ class QuakeBsp(DefaultHandler):
                 add(copy(force_write, dry_run, Path(path), f))
         
         #todo handle errors
-        print('errots: %s' % errors)
+        #print('errots: %s' % errors)
         return {'written': written_files}
 
     def remove(self, pkg, state):
         written_files = state['written']
-        print(pkg)
+        #print(pkg)
         files = pkg['files']
 
         subpkg = pkg['type'][self.name]
@@ -265,7 +265,7 @@ class QuakeBsp(DefaultHandler):
         install_paths = [self.get_install_path(basedir, path) for path in written_files]
 
         for path, install_path in zip(written_files, install_paths):
-            print(path)
+            #print(path)
             if not install_path.exists():
                 raise Exception('%s was written, but does not exist anymore')
             
@@ -296,7 +296,7 @@ class QuakeBsp(DefaultHandler):
                 if pinfo[hash_key] != hash_path(install_path):
                     raise Exception('%s was written, but was modified' % (path))
                 to_remove.append(install_path)
-        print(to_remove)
+        #print('removing %s.' % ', '.join([str(p) for p in to_remove]))
 
         dirs = []
         for path in to_remove :
@@ -429,7 +429,7 @@ def add(args, package_data, repos, files):
 def make_dirs(path):
     created = []
     for p in reversed([path] + list(path.parents)):
-        print(p)
+        #print(p)
         if not p.exists():
             p.mkdir()
             created.append(p)
@@ -531,7 +531,7 @@ def install(args, package_data, repo_data):
             if install:
                 to_install.append((dep, [(name, avail_version, req_version)]))
         to_install.append((name, version, []))
-    print(to_install)
+    print('installing %s.' % to_install)
     for name, version, as_dependency in to_install:
         p = package_data[name][version]
         write_json(p, package_backup_file(name))
