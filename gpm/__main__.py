@@ -13,12 +13,17 @@ import shutil
 
 import datetime
 
+import time
+
 date_format = '%Y-%m-%d %H:%M:%S %z'
 
 default_type_data = {'quake-bsp': {}}
 
 repo_ext = '.json'
+repo_files_ext = '.files' + repo_ext
 state_ext = '.json'
+
+repo_delim = '\\'
 
 config_dir = Path(os.path.expanduser('~')) / Path('.python-gpm')
 state_dir = config_dir / 'state'
@@ -41,8 +46,8 @@ def package_state_path(name):
 def package_backup_file(name):
     return package_state_path(name).with_suffix('.package')
 
-
-repositories = {'quaddicted': []}
+quaddicted_local = ('remote/quaddicted.json', 'remote/quaddicted.files.json')
+repositories = {'quaddicted': [('file://' + p for p in quaddicted_local)]}
 
 repos_filepath = Path('repos')
 
@@ -52,18 +57,25 @@ repo_dl_dir = "file:///home/hrehfeld/projects/quakeinjector/download/"
 def repo_download_url(package, path):
     return repo_dl_dir + path
 
-def get_uri(url):
+file_prot = 'file://'
+def is_url(url):
     #todo better support file://
-    prot = 'file://'
-    if not url.startswith(prot):
+    return not url.startswith(file_prot)
+
+def uri2path(uri):
+    return Path(uri[len(file_prot):])
+    
+    
+def get_uri(url, binary=True):
+    if is_url(url):
         print('Downloading %s...' % url)
         r = requests.get(url)
         
         if r.status_code != 200:
-            raise Exception('Could not download file: %i (%s)' % (r.status_code, url))
-        return r.content
+            raise FileNotFoundError('Could not download file: %i (%s)' % (r.status_code, url))
+        return r.content if binary else r.text
     else:
-        with Path(url[len(prot):]).open('rb') as fd:
+        with uri2path(url).open('rb' if binary else 'r') as fd:
             return fd.read()
                 
 
@@ -79,7 +91,7 @@ def cache_path(package, path=None):
 def cache_current(package, path):
     return cache_path(package, path).exists()
 
-package_keys = ['type', 'name', 'version', 'description', 'keywords', 'author', 'contributors', 'bugs', 'homepage', 'dependencies', 'files']
+package_keys = ['type', 'name', 'version', 'description', 'keywords', 'author', 'contributors', 'bugs', 'homepage', 'dependencies']
 
 hash_key = 'sha1'
 
@@ -136,7 +148,7 @@ class QuakeBsp(DefaultHandler):
     name = 'quake-bsp'
 
     quake_path = Path('/home/hrehfeld/projects/quake/')
-    package_keys = ['title', 'zipbasedir', 'commandline', 'startmap']
+    package_keys = ['title', 'zipbasedir', 'commandline', 'startmap', 'date']
     
 
     def basedir(self, subp):
@@ -145,18 +157,17 @@ class QuakeBsp(DefaultHandler):
     def get_install_path(self, basedir, path):
         return self.quake_path / basedir / path
     
-    def add(self, repo_data, datas):
-        rs = []
-        for data in datas:
-            qdata = data['type'][self.name]
+    def add(self, names_versions, repo_data, repo_files):
+        for (name, version) in names_versions:
+            qdata = repo_data[name][version]['type'][self.name]
             
             for k in list(qdata.keys()):
                 if k not in self.package_keys:
+                    warn('Illegal key %s.type.%s.%s' % (data['name'], self.name, k))
                     del (qdata[k])
-                    #raise Exception('Illegal key: %s' % k)
                     
 
-    def install(self, p, cachep, force_write):
+    def install(self, p, files, cachep, force_write):
         name = p['name']
 
         subp = p['type'][self.name]
@@ -228,7 +239,7 @@ class QuakeBsp(DefaultHandler):
                 pass
             else:
                 written_files.append(str(r) )
-        for path, f in p['files'].items():
+        for path, f in files.items():
             if f['subfiles']:
                 cpath = (cachep / path)
                 #print('opening %s' % cpath)
@@ -244,6 +255,7 @@ class QuakeBsp(DefaultHandler):
 
     def remove(self, pkg, state):
         written_files = state['written']
+        print(pkg)
         files = pkg['files']
 
         subpkg = pkg['type'][self.name]
@@ -304,6 +316,9 @@ handlers = { QuakeBsp.name: QuakeBsp }
 def repo_filepath(repo):
     return (repos_filepath / repo).with_suffix(repo_ext)
 
+def repo_files_path(repo):
+    return repo_filepath(repo).with_suffix(repo_files_ext)
+
 def subrepo_path(repo, handler):
     p = (repos_filepath / (repo + '-' + handler.name))
     return p.with_suffix(p.suffix + repo_ext)
@@ -315,9 +330,15 @@ def log(msg):
 def warn(msg):
     print('WARNING:', msg)
 
-def add_s(force, paths, packages, package_data, repo_data):
+class Package:
+    def __init__(self, **kwargs):
+        for a in package_keys:
+            setattr(self, a, kwargs.get('name', None))
+
+def add_s(force, paths, packages, package_data, repo_data, repo_files):
     handler_data = odict()
     for path, data in zip(paths, packages):
+#        p = Package(**data)
         name = data['name']
         log('adding %s...' % name)
 
@@ -338,6 +359,7 @@ def add_s(force, paths, packages, package_data, repo_data):
 
         files = data.get('files', [])
         if files:
+            del data['files']
             files = [Path(f) for f in files]
         if not files:
             for handler in _handlers:
@@ -356,29 +378,39 @@ def add_s(force, paths, packages, package_data, repo_data):
                 r['subfiles'] = container_fileinfos(real_f)
             file_infos[str(f)] = r
             
-        data['files'] = file_infos
 
         for t in types:
             handler_data.setdefault(t, [])
-            handler_data[t].append(data)
+            handler_data[t].append((name, version))
 
         p = odict()
         for k in package_keys:
             if k in data:
                 p[k] = data[k]
-        repo_data[name] = p
+        repo_data.setdefault(name, odict())
+        repo_data[name][version] = p
+        repo_files.setdefault(name, odict())
+        repo_files[name][version] = file_infos
 
+    #sort by version
+    for name, versions in repo_data.items():
+        repo_data[name] = odict(sorted(versions.items(), key=lambda t: t[0]))
+
+    for name, versions in repo_files.items():
+        repo_files[name] = odict(sorted(versions.items(), key=lambda t: t[0]))
         
-    for t, data in handler_data.items():
+    for t, names in handler_data.items():
         handler = handlers[t]()
-        handler.add(repo_data, data)
-    
+        #modifies data
+        handler.add(names, repo_data, repo_files)
 
-def add(args, package_data, repos):
+def add(args, package_data, repos, files):
     repo = args.repo
-    repo_data = odict()
+    repo_data = []
+    repo_files = odict()
     if repo in repos:
         repo_data = repos[repo]
+        repo_files = repos[repo]
 
     paths = args.paths
 
@@ -388,11 +420,11 @@ def add(args, package_data, repos):
         with pjson.open('r') as f:
             data = json.load(f)
 
-            add_s(args.force, [path], [data], package_data, repo_data)
+            add_s(args.force, [path], [data], package_data, repo_data, repo_files)
 
     repo_path = repo_filepath(repo)
     log('Writing ' + str(repo_path))
-    write_repo(repo_path, repo_data.values())
+    write_repo(repo_path, list(repo_data.values()))
     
 def make_dirs(path):
     created = []
@@ -413,6 +445,9 @@ def installed_version(name):
     version = p['version']
     return version
 
+def latest_version(versions):
+    return sorted(versions)[-1]
+
 def install(args, package_data, repo_data):
     make_dirs(installed_state_dir)
 
@@ -422,7 +457,9 @@ def install(args, package_data, repo_data):
     for name in packages:
         if name not in package_data:
             raise Exception('No such package: ' + name)
-        p = package_data[name]
+        version = latest_version(package_data[name].keys())
+        p = package_data[name][version]
+
         if name in installed_packages:
             instversion = installed_version(name)
             if semver.compare(instversion, p['version']) != -1:
@@ -464,9 +501,9 @@ def install(args, package_data, repo_data):
             #     if p == 'x':
             # version Must match version exactly
             return c(v, '==' + m)
-                    
-            
-        for dep, version in p['dependencies'].items():
+
+        #todo handle recursive deps
+        for dep, req_version in p['dependencies'].items():
             if dep not in package_data:
                 raise Exception('No such package: %s (as dependency of %s)' % (dep, name) )
             req_by = odict()
@@ -474,28 +511,29 @@ def install(args, package_data, repo_data):
                 dep_state = installed_packages[dep]
                 dep_version = dep_state['version']
                 req_by = dep_state['as_dependency']
-                if match_version(dep_version, version):
-                    req_by[name] = version
+                if match_version(dep_version, req_version):
+                    req_by[name] = req_version
                     continue
             #need to update
             dep_pkg = package_data[dep]
-            if not match_version(dep_pkg['version'], version):
-                raise Exception('Package %s required at version %s (trying: %s)' %  (name, version, dep_pkg['version']))
+            avail_version = dep_pkg['version']
+            if not match_version(avail_version, req_version):
+                raise Exception('Package %s required at version %s (trying: %s)' %  (name, req_version, avail_version))
 
             version_conflicts = []
             for oname, oversion in req_by.items():
-                if not match_version(dep_pkg['version'], oversion):
+                if not match_version(avail_version, oversion):
                     version_conflicts.append((oname, oversion))
             if version_conflicts:
                 raise Exception('Version Conflict: %s (%s) required by %s at %s in conflict with %s'
-                                %  (dep, dep_version, name, version, ' and '.join(['%s at %s' % (n, v) for (n, v) in version_conflicts])))
+                                %  (dep, dep_version, name, req_version, ' and '.join(['%s at %s' % (n, v) for (n, v) in version_conflicts])))
                         
             if install:
-                to_install.append((dep, [(name, version)]))
-        to_install.append((name, []))
+                to_install.append((dep, [(name, avail_version, req_version)]))
+        to_install.append((name, version, []))
     print(to_install)
-    for name, as_dependency in to_install:
-        p = package_data[name]
+    for name, version, as_dependency in to_install:
+        p = package_data[name][version]
         write_json(p, package_backup_file(name))
 
         cachedirp = cache_path(p)
@@ -521,7 +559,7 @@ def install(args, package_data, repo_data):
         state = odict()
         for t in types:
             handler = handlers[t]()
-            state[t] = handler.install(p, cachedirp, args.force)
+            state[t] = handler.install(p, files, cachedirp, args.force)
 
         write_json(state, package_state_path(name))
 
@@ -590,7 +628,8 @@ def remove(args, package_data, repo_data):
         
         state = load_json(package_state_path(name))
 
-        pkg = package_data[name]
+        version = latest_version(package_data[name].keys())
+        pkg = package_data[name][version]
         #check if version in pkg list is still same
         if inst['version'] != pkg['version']:
             #if not load pkg from disk
@@ -628,20 +667,14 @@ def list_packages(args, package_data, repo_data):
                 s = f(s)
             print(*s)
 
-def update_repo(repo_path, urls):
-    for url in urls:
-        r = requests.get(url)
-        if r.status_code != 200:
-            continue
+json_options = {'object_pairs_hook': odict }
 
-        with repopath.open('w') as f:
-            f.write(r.text)
-        return r.json
-    raise Exception('No response from any remote. Tried: ' + ', '.join(urls) + '.')
+def parse_json(f):
+    return json.loads(f, **json_options)
 
 def load_json(path):
     with path.open('r') as f:
-        return json.load(f, object_pairs_hook=odict)
+        return json.load(f, **json_options)
 
 def write_json(data, path):
     log('writing %s' % path)
@@ -653,34 +686,47 @@ def load_repo(repo_path):
     data = []
     if not repo_path.exists():
         log('Skipping repo ' + str(repo_path) + ', because file doesn\'t exist.')
-    else:
-        data = load_json(repo_path)
+        return []
+    data = load_json(repo_path)
     return data
     
 def write_repo(repo_path, repo_data):
     repo_path.parent.mkdir(parents=True, exist_ok=True)
     with repo_path.open('w') as f:
-        json.dump(list(repo_data), f)
+        json.dump(repo_data, f)
 
 
 def repo_format(data):
     return odict([(d['name'], d) for d in data])
 
+def update_repo(repo_path, repo_files_path, urls):
+    for url, furl in urls:
+        try:
+            r = get_uri(url, binary=False)
+            fr = get_uri(furl, binary=False)
+            return parse_json(r), parse_json(fr)
+        except FileNotFoundError:
+            continue
+    raise Exception('Could not load remote repository: %s' % ', '.join(urls))
+
 def update_repos(repositories):
-    repo_data = {}
-    for repo, urls in repositories.items():
-        repopath = repo_filepath(repo)
-        data = update_repo(repopath, urls)
-        repo_data[repo] = repo_format(data)
+    paths = [repo_filepath(r) for r in repositories]
+    repo_data, repo_files = odict(), odict()
+    for (repo, urls), path in zip(repositories.items(), paths):
+        data, files = update_repo(repo_filepath(repo), repo_files_path(repo), urls)
+        for name, versions in files.items():
+            for version in versions:
+                data[name][version]['files'] = files[name][version]
+                
+        write_repo(path, data)
+        repo_data[repo] = data
     return repo_data
 
 def load_repos(repos):
     repo_data = {}
-    for repo in repositories:
-        repopath = repo_filepath(repo)
-        data = load_repo(repopath)
-        repo_data[repo] = repo_format(data)
-    return repo_data
+    paths = [repo_filepath(r) for r in repos]
+    data = [load_repo(p) for p in paths]
+    return odict(zip(repos.keys(), data))
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="A plugin/handler based package manager")
@@ -742,11 +788,9 @@ if __name__ == '__main__':
 
     package_data = odict()
     for repo, data in repo_data.items():
-        for values in data.values():
-            name = values['name']
-            assert(name not in package_data)
-            package_data[name] = values
-                
+        package_data.update(data)
+
+    print(package_data)
     if 'func' not in args:
         parser.print_help()
         exit(1)
