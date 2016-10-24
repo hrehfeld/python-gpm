@@ -594,7 +594,6 @@ def remove(args, package_data, repo_data):
         return req
 
     def check_remove(name, also_removed=[], error_on_required=True, ):
-        print(name)
         if name not in installed_packages:
             raise Exception('Package %s is not installed' % name)
 
@@ -622,7 +621,6 @@ def remove(args, package_data, repo_data):
     to_remove = []
     for name in packages:
         to_remove += check_remove(name, packages)
-    print(to_remove)
     for name in to_remove:
         inst = installed_packages[name]
         
@@ -790,7 +788,6 @@ if __name__ == '__main__':
     for repo, data in repo_data.items():
         package_data.update(data)
 
-    print(package_data)
     if 'func' not in args:
         parser.print_help()
         exit(1)
