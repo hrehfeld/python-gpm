@@ -513,23 +513,37 @@ def install(args, package_data, repo_data):
                 req_by = dep_state['as_dependency']
                 if match_version(dep_version, req_version):
                     req_by[name] = req_version
+                    #matching version already installed
                     continue
             #need to update
-            dep_pkg = package_data[dep]
-            avail_version = dep_pkg['version']
-            if not match_version(avail_version, req_version):
-                raise Exception('Package %s required at version %s (trying: %s)' %  (name, req_version, avail_version))
+            matching_version = False
+            version_conflicts = odict()
+            for avail_version, dep_pkg in package_data[dep].items():
+                if match_version(avail_version, req_version):
+                    #check if other packages require conflicting versions
+                    cs = odict()
+                    for oname, oversion in req_by.items():
+                        if not match_version(avail_version, oversion):
+                            cs[oname] = oversion
+                    if cs:
+                        version_conflicts[avail_version] = cs
+                    else:
+                        matching_version = avail_version
+                        break
+            if not matching_version:
+                if version_conflicts:
+                    msg = []
+                    for v, cs in version_conflicts.items():
+                        s = '%s: %s' % (v, ', '.join(['%s @%s' % o for o in cs.items()]))
+                        msg.append(s)
 
-            version_conflicts = []
-            for oname, oversion in req_by.items():
-                if not match_version(avail_version, oversion):
-                    version_conflicts.append((oname, oversion))
-            if version_conflicts:
-                raise Exception('Version Conflict: %s (%s) required by %s at %s in conflict with %s'
-                                %  (dep, dep_version, name, req_version, ' and '.join(['%s at %s' % (n, v) for (n, v) in version_conflicts])))
+                    raise Exception('Package %s required at version %s, but conflicting versions required by other packages: %s'
+                                    %  (dep, req_version, '\n'.join(msg)))
+                    
+                raise Exception('Package %s required at version %s but no matching versions (found: %s)' %  (
+                    dep, req_version, ', '.join(package_data[dep].keys())))
                         
-            if install:
-                to_install.append((dep, [(name, avail_version, req_version)]))
+            to_install.append((dep, matching_version, [(name, req_version)]))
         to_install.append((name, version, []))
     print('installing %s.' % to_install)
     for name, version, as_dependency in to_install:
