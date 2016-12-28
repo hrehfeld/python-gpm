@@ -8,12 +8,15 @@ import semver
 import hashlib
 from collections import OrderedDict as odict
 
-from zipfile import ZipFile
-import shutil
+#from zipfile import ZipFile
+#import shutil
 
 import datetime
 
 import time
+
+from common import log, warn, FileInfo, hash_file, hash_path
+from pprint import pprint
 
 date_format = '%Y-%m-%d %H:%M:%S %z'
 
@@ -46,7 +49,7 @@ def package_state_path(name):
 def package_backup_file(name):
     return package_state_path(name).with_suffix('.package')
 
-quaddicted_local = ('remote/quaddicted.json', 'remote/quaddicted.files.json')
+quaddicted_local = ('remote/quaddicted_formatted', 'remote/quaddicted_formatted.files')
 repositories = {'quaddicted': [('file://' + p for p in quaddicted_local)]}
 
 repos_filepath = Path('repos')
@@ -93,23 +96,9 @@ def cache_current(package, path):
 
 package_keys = ['type', 'name', 'version', 'description', 'keywords', 'author', 'contributors', 'bugs', 'homepage', 'dependencies']
 
-hash_key = 'sha1'
 
 
 
-
-def hash_path(path):
-    with path.open('rb') as f:
-        return hash_file(f)
-
-def hash_file(f):
-    hash = hashlib.sha1()
-    #todo read chunks
-    hash.update(f.read())
-    return hash.hexdigest()
-
-def is_dir(pinfo):
-    return pinfo['size'] == 0
 
 def is_container(f):
     #todo support more
@@ -126,14 +115,15 @@ def container_fileinfos(path):
             if subpath.file_size > 0:
                 with zf.open(subpath.filename, 'r') as f:
                     hash = hash_file(f);
-                r[hash_key] = hash
+                r[FileInfo.hash_key] = hash
 
 
             files[subpath.filename] = r
 #    print(files)
     return files
             
-                
+import quakebsp                
+handlers = { quakebsp.QuakeBsp.name: quakebsp.QuakeBsp }
     
 
 class DefaultHandler:
@@ -144,174 +134,6 @@ class DefaultHandler:
         return [p.with_suffix(p.suffix + '.' + self.ext)]
         
 
-class QuakeBsp(DefaultHandler):
-    name = 'quake-bsp'
-
-    quake_path = Path('/home/hrehfeld/projects/quake/')
-    package_keys = ['title', 'zipbasedir', 'commandline', 'startmap', 'date']
-    
-
-    def basedir(self, subp):
-        return subp.get('zipbasedir', 'id1')
-
-    def get_install_path(self, basedir, path):
-        return self.quake_path / basedir / path
-    
-    def add(self, names_versions, repo_data, repo_files):
-        for (name, version) in names_versions:
-            qdata = repo_data[name][version]['type'][self.name]
-            
-            for k in list(qdata.keys()):
-                if k not in self.package_keys:
-                    warn('Illegal key %s.type.%s.%s' % (data['name'], self.name, k))
-                    del (qdata[k])
-                    
-
-    def install(self, p, files, cachep, force_write):
-        name = p['name']
-
-        subp = p['type'][self.name]
-        basedir = self.basedir(subp)
-
-        qpath = self.quake_path
-        #todo handle
-        assert(qpath.exists())
-
-        def copy(force_write, dryrun, dlfd, path, f):
-            installp = self.get_install_path(basedir, path)
-            relp = PurePath(basedir) / path
-            def write():
-                if not dry_run:
-                    installp.parent.mkdir(parents=True, exist_ok=True)
-                    if isdir:
-                        #create dirs as well
-                        log('creating dir %s' % installp)
-                        installp.mkdir()
-                    else:
-                        #write file
-                        with installp.open('wb') as fd:
-                            log('writing %s' % installp)
-                            shutil.copyfileobj(dlfd, fd)
-                return path
-            
-            def backup():
-                bp = backup_dir / relp
-                bp.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(installp), str(bp))
-                
-            isdir = is_dir(f)
-            exists = installp.exists()
-            #check if f exists
-            if exists:
-                if isdir:
-                    if installp.is_dir():
-                        return None
-                    else:
-                        if force_write:
-                            backup()
-                        else:
-                            return 'directory %s exists' % installp
-                else:
-                    if installp.is_dir():
-                        if force_write:
-                            backup()
-                        else:
-                            return 'directory %s exists, expected file' % installp
-                    else:
-                        # and compare hash
-                        ha = hash_path(installp)
-                        if ha == f[hash_key]:
-                            return None
-                        else:
-                            if force_write:
-                                backup()
-                            else:
-                                return 'file %s exists with different hash' % installp
-            return write()
-        written_files = []
-        errors = []
-        dry_run = False
-        def add(r):
-            if isinstance(r, str):
-                errors.append(r)
-                dry_run = True
-            elif r is None:
-                pass
-            else:
-                written_files.append(str(r) )
-        for path, f in files.items():
-            if f['subfiles']:
-                cpath = (cachep / path)
-                #print('opening %s' % cpath)
-                with ZipFile(str(cpath), 'r') as zf:
-                    for subpath, subf in f['subfiles'].items():
-                        add(copy(force_write, dry_run, zf.open(subpath, 'r'), Path(subpath), subf))
-            else:
-                add(copy(force_write, dry_run, Path(path), f))
-        
-        #todo handle errors
-        #print('errots: %s' % errors)
-        return {'written': written_files}
-
-    def remove(self, pkg, state):
-        written_files = state['written']
-        #print(pkg)
-        files = pkg['files']
-
-        subpkg = pkg['type'][self.name]
-        basedir = self.basedir(subpkg)
-
-        to_remove = []
-        install_paths = [self.get_install_path(basedir, path) for path in written_files]
-
-        for path, install_path in zip(written_files, install_paths):
-            #print(path)
-            if not install_path.exists():
-                raise Exception('%s was written, but does not exist anymore')
-            
-            pinfo = None
-            if path in files:
-                pinfo = files[path]
-            else:
-                #check container files
-                for fp, f in files.items():
-                    if 'subfiles' in f:
-                        sfiles = f['subfiles']
-                        #todo handle relative paths?
-                        if path in sfiles:
-                            pinfo = sfiles[path]
-                            break
-            if not pinfo:
-                raise Exception('%s was written, but was not found in pkg file for  %s' % (path, pkg['name']))
-            if is_dir(pinfo):
-                #for subf in install_path.iterdir():
-                #    if subf not in install_paths:
-                #        raise Exception('File %s in %s/ was not installed, cannot delete dir' % (subf, path))
-                if not len(installed_path.iterdir()):
-                    to_remove.append(install_path)
-            else:
-                stats = install_path.stat()
-                if pinfo['size'] != stats.st_size:
-                    raise Exception('%s was written, but was modified' % (path))
-                if pinfo[hash_key] != hash_path(install_path):
-                    raise Exception('%s was written, but was modified' % (path))
-                to_remove.append(install_path)
-        #print('removing %s.' % ', '.join([str(p) for p in to_remove]))
-
-        dirs = []
-        for path in to_remove :
-            if path.is_dir():
-                dirs.append(path)
-                continue
-            log('Removing %s' % path)
-            path.unlink()
-
-        for path in dirs:
-            log('Removing %s' % path)
-            path.rmdir()
-
-
-handlers = { QuakeBsp.name: QuakeBsp }
 
 def repo_filepath(repo):
     return (repos_filepath / repo).with_suffix(repo_ext)
@@ -323,12 +145,6 @@ def subrepo_path(repo, handler):
     p = (repos_filepath / (repo + '-' + handler.name))
     return p.with_suffix(p.suffix + repo_ext)
 
-
-def log(msg):
-    print(msg)
-
-def warn(msg):
-    print('WARNING:', msg)
 
 class Package:
     def __init__(self, **kwargs):
@@ -372,7 +188,7 @@ def add_s(force, paths, packages, package_data, repo_data, repo_files):
         file_infos = odict()
         for f, real_f in zip(files, real_files):
             r = odict()
-            r[hash_key] = hash_path(real_f)
+            r[FileInfo.hash_key] = hash_path(real_f)
             r['size'] = real_f.stat().st_size
             if is_container(real_f):
                 r['subfiles'] = container_fileinfos(real_f)
@@ -561,7 +377,7 @@ def install(args, package_data, repo_data):
             hash = hashlib.sha1()
             hash.update(content)
             ha = hash.hexdigest()
-            if ha != f[hash_key]:
+            if ha != f[FileInfo.hash_key]:
                 raise Exception('Download for %s was broken (failed hash).' % url)
 
             cachep.parent.mkdir(parents=True, exist_ok=True)
